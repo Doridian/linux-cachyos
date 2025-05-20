@@ -1,0 +1,67 @@
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+index f8b3e04d71ed..5ac7bd5942d0 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+@@ -4907,20 +4907,28 @@ static int amdgpu_device_evict_resources(struct amdgpu_device *adev)
+  * @data: data
+  *
+  * This function is called when the system is about to suspend or hibernate.
+- * It is used to set the appropriate flags so that eviction can be optimized
+- * in the pm prepare callback.
++ * It is used to evict resources from the device before the system goes to
++ * sleep while there is still access to swap.
+  */
+ static int amdgpu_device_pm_notifier(struct notifier_block *nb, unsigned long mode,
+ 				     void *data)
+ {
+ 	struct amdgpu_device *adev = container_of(nb, struct amdgpu_device, pm_nb);
++	int r;
+ 
+ 	switch (mode) {
+ 	case PM_HIBERNATION_PREPARE:
+ 		adev->in_s4 = true;
+-		break;
+-	case PM_POST_HIBERNATION:
+-		adev->in_s4 = false;
++		fallthrough;
++	case PM_SUSPEND_PREPARE:
++		r = amdgpu_device_evict_resources(adev);
++		/*
++		 * This is considered non-fatal at this time because
++		 * amdgpu_device_prepare() will also fatally evict resources.
++		 * See https://gitlab.freedesktop.org/drm/amd/-/issues/3781
++		 */
++		if (r)
++			drm_warn(adev_to_drm(adev), "Failed to evict resources, freeze active processes if problems occur: %d\n", r);
+ 		break;
+ 	}
+ 
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+index 72c807f5822e..24ee4710f807 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+@@ -2615,8 +2615,13 @@ static int amdgpu_pmops_freeze(struct device *dev)
+ static int amdgpu_pmops_thaw(struct device *dev)
+ {
+ 	struct drm_device *drm_dev = dev_get_drvdata(dev);
++	struct amdgpu_device *adev = drm_to_adev(drm_dev);
++	int r;
+ 
+-	return amdgpu_device_resume(drm_dev, true);
++	r = amdgpu_device_resume(drm_dev, true);
++	adev->in_s4 = false;
++
++	return r;
+ }
+ 
+ static int amdgpu_pmops_poweroff(struct device *dev)
+@@ -2629,6 +2634,9 @@ static int amdgpu_pmops_poweroff(struct device *dev)
+ static int amdgpu_pmops_restore(struct device *dev)
+ {
+ 	struct drm_device *drm_dev = dev_get_drvdata(dev);
++	struct amdgpu_device *adev = drm_to_adev(drm_dev);
++
++	adev->in_s4 = false;
+ 
+ 	return amdgpu_device_resume(drm_dev, true);
+ }
